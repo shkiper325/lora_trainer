@@ -3,3 +3,5 @@ dataset/
 models/
 WIP/
 *.sh
+*.pyc
+__pycache__/
