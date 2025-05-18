@@ -29,7 +29,7 @@ def parse_args():
       --output_dir: директория для сохранения модели и чекпоинтов;
       --num_train_epochs, --batch_size, --grad_accum_steps, --learning_rate: гиперпараметры обучения;
       --lora_r, --lora_alpha, --lora_dropout: параметры конфигурации LoRA;
-      --checkpoint: путь для возобновления обучения с определённого чекпоинта;
+      --checkpoint_dir: путь для возобновления обучения с определённого чекпоинта;
       --save_freq: частота сохранения чекпоинтов;
       --lr_scheduler_type: тип планировщика скорости обучения;
       --message: способ уведомления ('notify' для уведомлений Ubuntu или 'tg' для Telegram);
@@ -94,7 +94,7 @@ def parse_args():
         help='Dropout для LoRA.'
     )
     parser.add_argument(
-        '--checkpoint', type=str, default=None,
+        '--checkpoint_dir', type=str, default=None,
         help='Путь к директории с чекпоинтом для возобновления обучения (например, \'./lora-8bit-clm/checkpoint-1000\').'
     )
     parser.add_argument(
@@ -335,7 +335,7 @@ def main():
     )
 
     # 12. Запуск обучения (с учетом возможности возобновления с чекпоинта)
-    trainer.train(resume_from_checkpoint=args.checkpoint)
+    trainer.train(resume_from_checkpoint=args.checkpoint_dir)
 
     # 13. Сохранение финальной модели
     trainer.save_model()
