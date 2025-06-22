@@ -15,6 +15,10 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model, TaskType
 from tg_cred import TG_API_KEY, TG_CHAT_ID
+from peft import prepare_model_for_kbit_training
+from accelerate import init_empty_weights
+from accelerate.utils import load_and_quantize_model, BnbQuantizationConfig
+from transformers import AutoConfig
 
 
 def parse_args():
@@ -106,9 +110,10 @@ def parse_args():
         help='Коэффициент разогрева для планировщика скорости обучения.'
     )
     parser.add_argument(
-        '--target_modules', action='store_true',
-        help='Указать ["q_proj", "v_proj"] как модули для LoRA.'
+        '--default_target', type=bool, default=False,
+        help='Коэффициент разогрева для планировщика скорости обучения.'
     )
+
 
     return parser.parse_args()
 
@@ -162,6 +167,7 @@ def main():
 
     tokenized = raw_datasets.map(tokenize_function, batched=True, remove_columns=['text'])
 
+    # Разбиение строе на чанки
     def chunk_lines(examples):
         result = {'input_ids': [], 'attention_mask': []}
         for ids in examples['input_ids']:
@@ -175,15 +181,28 @@ def main():
 
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    # Квантование всегда 8-bit
-    bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+    # Настройка квантования
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16
+    )
+
+    # Загрузка модели
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         quantization_config=bnb_config,
-        device_map='auto'
+        device_map='cpu',
+        torch_dtype=torch.float16
     )
 
-    # Подключение LoRA
+    torch.cuda.empty_cache()
+    model.to("cuda:0")  
+    
+    model = prepare_model_for_kbit_training(model)
+    
+    # LoRA конфигурация
     lora_kwargs = dict(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
@@ -191,7 +210,8 @@ def main():
         bias='none',
         task_type=TaskType.CAUSAL_LM
     )
-    if args.target_modules:
+    # Если не  указаны модули, то используем q_proj и v_proj
+    if args.default_target == True:
         lora_kwargs['target_modules'] = ['q_proj', 'v_proj']
     lora_config = LoraConfig(**lora_kwargs)
     model = get_peft_model(model, lora_config)
@@ -213,7 +233,8 @@ def main():
         save_steps=args.save_freq,
         logging_steps=5,
         report_to='tensorboard',
-        logging_dir=os.path.join(args.output_dir, 'logs')
+        logging_dir=os.path.join(args.output_dir, 'logs'),
+        gradient_checkpointing=True
     )
 
     trainer = Trainer(
@@ -224,7 +245,11 @@ def main():
         callbacks=[NotificationCallback(send_notification)] if send_notification else None
     )
 
-    trainer.train(resume_from_checkpoint=args.checkpoint_dir)
+    if args.checkpoint_dir is not None:
+        trainer.train(resume_from_checkpoint=args.checkpoint_dir)
+    else:
+        trainer.train()
+
     trainer.save_model()
     print('Обучение завершено. Модель сохранена в:', args.output_dir)
 
