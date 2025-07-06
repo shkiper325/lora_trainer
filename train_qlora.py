@@ -167,7 +167,7 @@ def main():
 
     tokenized = raw_datasets.map(tokenize_function, batched=True, remove_columns=['text'])
 
-    # Разбиение строе на чанки
+    # Разбиение строк на чанки
     def chunk_lines(examples):
         result = {'input_ids': [], 'attention_mask': []}
         for ids in examples['input_ids']:
@@ -183,10 +183,7 @@ def main():
 
     # Настройка квантования
     bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.bfloat16
+        load_in_8bit=True
     )
 
     # Загрузка модели
