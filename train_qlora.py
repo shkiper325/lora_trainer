@@ -190,12 +190,9 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         quantization_config=bnb_config,
-        device_map='cpu',
+        device_map='auto',
         torch_dtype=torch.float16
-    )
-
-    torch.cuda.empty_cache()
-    model.to("cuda:0")  
+    ) 
     
     model = prepare_model_for_kbit_training(model)
     
