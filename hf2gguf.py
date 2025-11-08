@@ -90,6 +90,33 @@ def convert_to_gguf(merged_dir, gguf_file, llama_cpp_dir):
     ])
 
 
+def quantize_gguf(input_file, output_file, quant_type, llama_cpp_dir):
+    """Квантизация GGUF-файла."""
+    llama_cpp_path = Path(llama_cpp_dir).expanduser().resolve()
+    quantize_bin = llama_cpp_path / "build" / "bin" / "llama-quantize"
+
+    # Сборка llama.cpp если нужно
+    if not quantize_bin.exists():
+        log("Сборка llama.cpp...")
+        build_dir = llama_cpp_path / "build"
+        build_dir.mkdir(exist_ok=True)
+
+        run_command(["cmake", "-B", str(build_dir), "-S", str(llama_cpp_path)])
+        run_command(["cmake", "--build", str(build_dir), "--config", "Release", "-j"])
+
+        if not quantize_bin.exists():
+            log("ОШИБКА: Утилита квантизации не найдена после сборки")
+            sys.exit(1)
+
+    log(f"Квантизация в {quant_type}...")
+    run_command([
+        str(quantize_bin),
+        str(input_file),
+        str(output_file),
+        quant_type
+    ])
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Слияние базовой модели с LoRA и конвертация в GGUF"
@@ -131,6 +158,13 @@ def main():
         help="HuggingFace токен (или переменная HF_TOKEN)"
     )
 
+    parser.add_argument(
+        "--quantize",
+        type=str,
+        default=None,
+        help="Тип квантизации (q4_0, q4_1, q5_0, q5_1, q8_0 и т.д.)"
+    )
+
     args = parser.parse_args()
 
     # Создание директории вывода
@@ -145,7 +179,15 @@ def main():
         gguf_path = output_path / args.gguf_name
         convert_to_gguf(output_path, gguf_path, args.llama_cpp)
 
-        log(f"Готово: {gguf_path}")
+        # Квантизация если требуется
+        if args.quantize:
+            quant_name = args.gguf_name.replace("_f16.gguf", f"_{args.quantize}.gguf")
+            quant_name = quant_name.replace(".gguf", f"_{args.quantize}.gguf") if quant_name == args.gguf_name else quant_name
+            quant_path = output_path / quant_name
+            quantize_gguf(gguf_path, quant_path, args.quantize, args.llama_cpp)
+            log(f"Готово: {quant_path}")
+        else:
+            log(f"Готово: {gguf_path}")
 
     except KeyboardInterrupt:
         log("Прервано пользователем")
