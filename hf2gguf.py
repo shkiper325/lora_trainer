@@ -2,9 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 Скрипт для слияния базовой модели с LoRA-адаптером и конвертации в GGUF.
+
+Для систем с ограниченной памятью (32GB RAM):
+  python hf2gguf.py --base MODEL --lora ADAPTER --cpu-only --max-memory 20GB --offload
+
+Параметры оптимизации:
+  --cpu-only       - работа без GPU
+  --max-memory     - лимит RAM (рекомендуется 20-24GB для 32GB систем)
+  --offload        - сохранение части модели на диск (медленнее, но безопаснее)
 """
 
 import argparse
+import gc
 import os
 import subprocess
 import sys
@@ -30,22 +39,51 @@ def run_command(cmd):
     return result
 
 
-def merge_model(base_repo, peft_repo, output_dir, hf_token):
+def merge_model(base_repo, peft_repo, output_dir, hf_token, cpu_only=False, max_mem="24GB", offload=False):
     """Загрузка и слияние базовой модели с LoRA-адаптером."""
+
+    # Настройки для CPU или GPU
+    if cpu_only:
+        log(f"Режим CPU: лимит памяти {max_mem}")
+        device_map = {"": "cpu"}
+        torch_dtype = torch.float16
+        max_memory = {"cpu": max_mem}
+
+        # Offload для больших моделей
+        offload_folder = None
+        if offload:
+            offload_folder = str(output_dir / "offload_tmp")
+            log(f"Disk offload включён: {offload_folder}")
+    else:
+        device_map = "auto"
+        torch_dtype = torch.float16
+        max_memory = None
+        offload_folder = None
+
     log("Загрузка базовой модели...")
     model = AutoModelForCausalLM.from_pretrained(
         base_repo,
-        torch_dtype=torch.float16,
-        device_map="auto",
+        torch_dtype=torch_dtype,
+        device_map=device_map,
+        max_memory=max_memory,
+        offload_folder=offload_folder,
         low_cpu_mem_usage=True,
         token=hf_token,
     )
 
     log("Загрузка LoRA-адаптера...")
+    peft_kwargs = {"token": hf_token}
+
+    # Передача параметров offload для PEFT
+    if offload_folder:
+        peft_kwargs["offload_folder"] = offload_folder
+        peft_kwargs["device_map"] = device_map
+        peft_kwargs["max_memory"] = max_memory
+
     model = PeftModel.from_pretrained(
         model,
         peft_repo,
-        token=hf_token,
+        **peft_kwargs
     )
 
     log("Слияние весов...")
@@ -58,7 +96,21 @@ def merge_model(base_repo, peft_repo, output_dir, hf_token):
     tokenizer = AutoTokenizer.from_pretrained(base_repo, token=hf_token)
     tokenizer.save_pretrained(output_dir)
 
-    return model
+    # Освобождение памяти
+    del model
+    del tokenizer
+    gc.collect()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    # Очистка временной папки offload
+    if offload_folder:
+        import shutil
+        offload_path = Path(offload_folder)
+        if offload_path.exists():
+            shutil.rmtree(offload_path)
+            log("Временные файлы offload удалены")
+
+    log("Модель сохранена, память освобождена")
 
 
 def convert_to_gguf(merged_dir, gguf_file, llama_cpp_dir):
@@ -101,8 +153,8 @@ def quantize_gguf(input_file, output_file, quant_type, llama_cpp_dir):
         build_dir = llama_cpp_path / "build"
         build_dir.mkdir(exist_ok=True)
 
-        run_command(["cmake", "-B", str(build_dir), "-S", str(llama_cpp_path)])
-        run_command(["cmake", "--build", str(build_dir), "--config", "Release", "-j"])
+        run_command(["cmake", "-DLLAMA_CURL=OFF", "-B", str(build_dir), "-S", str(llama_cpp_path)])
+        run_command(["cmake",  "--build", str(build_dir), "--config", "Release", "-j"])
 
         if not quantize_bin.exists():
             log("ОШИБКА: Утилита квантизации не найдена после сборки")
@@ -165,7 +217,31 @@ def main():
         help="Тип квантизации (q4_0, q4_1, q5_0, q5_1, q8_0 и т.д.)"
     )
 
+    parser.add_argument(
+        "--cpu-only",
+        action="store_true",
+        help="Использовать только CPU (без GPU)"
+    )
+
+    parser.add_argument(
+        "--max-memory",
+        type=str,
+        default="24GB",
+        help="Максимальная память для CPU режима (по умолчанию: 24GB)"
+    )
+
+    parser.add_argument(
+        "--offload",
+        action="store_true",
+        help="Использовать disk offload для больших моделей"
+    )
+
     args = parser.parse_args()
+
+    # Отключение GPU если требуется
+    if args.cpu_only:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        log("GPU отключен (CUDA_VISIBLE_DEVICES='')")
 
     # Создание директории вывода
     output_path = Path(args.output).expanduser().resolve()
@@ -173,7 +249,15 @@ def main():
 
     try:
         # Слияние модели
-        merge_model(args.base, args.lora, output_path, args.hf_token)
+        merge_model(
+            args.base,
+            args.lora,
+            output_path,
+            args.hf_token,
+            args.cpu_only,
+            args.max_memory,
+            args.offload
+        )
 
         # Конвертация в GGUF
         gguf_path = output_path / args.gguf_name
@@ -181,8 +265,12 @@ def main():
 
         # Квантизация если требуется
         if args.quantize:
-            quant_name = args.gguf_name.replace("_f16.gguf", f"_{args.quantize}.gguf")
-            quant_name = quant_name.replace(".gguf", f"_{args.quantize}.gguf") if quant_name == args.gguf_name else quant_name
+            # Генерация имени квантизированного файла
+            if "_f16.gguf" in args.gguf_name:
+                quant_name = args.gguf_name.replace("_f16.gguf", f"_{args.quantize}.gguf")
+            else:
+                quant_name = args.gguf_name.replace(".gguf", f"_{args.quantize}.gguf")
+
             quant_path = output_path / quant_name
             quantize_gguf(gguf_path, quant_path, args.quantize, args.llama_cpp)
             log(f"Готово: {quant_path}")
