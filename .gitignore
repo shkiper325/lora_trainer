@@ -4,7 +4,8 @@ models/
 WIP/
 .vscode/
 llama.cpp/
-*.sh
 *.pyc
 *.tar
 *.txt
+commands.sh
+job.sh
