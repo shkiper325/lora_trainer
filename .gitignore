@@ -1,10 +1,10 @@
-перки/
+__pycache__/
 dataset/
 models/
 WIP/
+.vscode/
+llama.cpp/
 *.sh
 *.pyc
-__pycache__/
 *.tar
-YandexGPT5Lite/
 *.txt
